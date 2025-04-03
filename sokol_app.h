@@ -1741,8 +1741,7 @@ typedef struct sapp_allocator {
     _SAPP_LOGITEM_XMACRO(ANDROID_NATIVE_ACTIVITY_ONCREATE, "NativeActivity onCreate") \
     _SAPP_LOGITEM_XMACRO(ANDROID_CREATE_THREAD_PIPE_FAILED, "failed to create thread pipe") \
     _SAPP_LOGITEM_XMACRO(ANDROID_NATIVE_ACTIVITY_CREATE_SUCCESS, "NativeActivity successfully created") \
-    _SAPP_LOGITEM_XMACRO(WGPU_SWAPCHAIN_CREATE_SURFACE_FAILED, "wgpu: failed to create surface for swapchain") \
-    _SAPP_LOGITEM_XMACRO(WGPU_SWAPCHAIN_CREATE_SWAPCHAIN_FAILED, "wgpu: failed to create swapchain object") \
+    _SAPP_LOGITEM_XMACRO(WGPU_SWAPCHAIN_CREATE_SURFACE_FAILED, "wgpu: failed to create surface") \
     _SAPP_LOGITEM_XMACRO(WGPU_SWAPCHAIN_CREATE_DEPTH_STENCIL_TEXTURE_FAILED, "wgpu: failed to create depth-stencil texture for swapchain") \
     _SAPP_LOGITEM_XMACRO(WGPU_SWAPCHAIN_CREATE_DEPTH_STENCIL_VIEW_FAILED, "wgpu: failed to create view object for swapchain depth-stencil texture") \
     _SAPP_LOGITEM_XMACRO(WGPU_SWAPCHAIN_CREATE_MSAA_TEXTURE_FAILED, "wgpu: failed to create msaa texture for swapchain") \
@@ -2001,11 +2000,11 @@ SOKOL_APP_API_DECL const void* sapp_win32_get_hwnd(void);
 
 /* WebGPU: get WGPUDevice handle */
 SOKOL_APP_API_DECL const void* sapp_wgpu_get_device(void);
-/* WebGPU: get swapchain's WGPUTextureView handle for rendering */
+/* WebGPU: get surface's WGPUTextureView handle for rendering */
 SOKOL_APP_API_DECL const void* sapp_wgpu_get_render_view(void);
-/* WebGPU: get swapchain's MSAA-resolve WGPUTextureView (may return null) */
+/* WebGPU: get surface's MSAA-resolve WGPUTextureView (may return null) */
 SOKOL_APP_API_DECL const void* sapp_wgpu_get_resolve_view(void);
-/* WebGPU: get swapchain's WGPUTextureView for the depth-stencil surface */
+/* WebGPU: get surface's WGPUTextureView for the depth-stencil surface */
 SOKOL_APP_API_DECL const void* sapp_wgpu_get_depth_stencil_view(void);
 
 /* GL: get framebuffer object */
@@ -2588,12 +2587,11 @@ typedef struct {
     WGPUDevice device;
     WGPUTextureFormat render_format;
     WGPUSurface surface;
-    WGPUSwapChain swapchain;
     WGPUTexture msaa_tex;
     WGPUTextureView msaa_view;
     WGPUTexture depth_stencil_tex;
     WGPUTextureView depth_stencil_view;
-    WGPUTextureView swapchain_view;
+    WGPUTextureView surface_view;
     bool async_init_done;
 } _sapp_wgpu_t;
 #endif
@@ -5770,16 +5768,15 @@ _SOKOL_PRIVATE void _sapp_emsc_webgl_init(void) {
 
 #if defined(SOKOL_WGPU)
 
-_SOKOL_PRIVATE void _sapp_emsc_wgpu_create_swapchain(void) {
+_SOKOL_PRIVATE void _sapp_emsc_wgpu_create_surface(void) {
     SOKOL_ASSERT(_sapp.wgpu.instance);
     SOKOL_ASSERT(_sapp.wgpu.device);
     SOKOL_ASSERT(0 == _sapp.wgpu.surface);
-    SOKOL_ASSERT(0 == _sapp.wgpu.swapchain);
     SOKOL_ASSERT(0 == _sapp.wgpu.msaa_tex);
     SOKOL_ASSERT(0 == _sapp.wgpu.msaa_view);
     SOKOL_ASSERT(0 == _sapp.wgpu.depth_stencil_tex);
     SOKOL_ASSERT(0 == _sapp.wgpu.depth_stencil_view);
-    SOKOL_ASSERT(0 == _sapp.wgpu.swapchain_view);
+    SOKOL_ASSERT(0 == _sapp.wgpu.surface_view);
 
     WGPUSurfaceDescriptorFromCanvasHTMLSelector canvas_desc;
     _sapp_clear(&canvas_desc, sizeof(canvas_desc));
@@ -5794,17 +5791,39 @@ _SOKOL_PRIVATE void _sapp_emsc_wgpu_create_swapchain(void) {
     }
     _sapp.wgpu.render_format = wgpuSurfaceGetPreferredFormat(_sapp.wgpu.surface, _sapp.wgpu.adapter);
 
-    WGPUSwapChainDescriptor sc_desc;
-    _sapp_clear(&sc_desc, sizeof(sc_desc));
-    sc_desc.usage = WGPUTextureUsage_RenderAttachment;
-    sc_desc.format = _sapp.wgpu.render_format;
-    sc_desc.width = (uint32_t)_sapp.framebuffer_width;
-    sc_desc.height = (uint32_t)_sapp.framebuffer_height;
-    sc_desc.presentMode = WGPUPresentMode_Fifo;
-    _sapp.wgpu.swapchain = wgpuDeviceCreateSwapChain(_sapp.wgpu.device, _sapp.wgpu.surface, &sc_desc);
-    if (0 == _sapp.wgpu.swapchain) {
-        _SAPP_PANIC(WGPU_SWAPCHAIN_CREATE_SWAPCHAIN_FAILED);
+    WGPUCompositeAlphaMode alpha_mode = WGPUCompositeAlphaMode_Auto;
+    if (_sapp.desc.alpha) {
+        alpha_mode = _sapp.desc.html5_premultiplied_alpha ?
+            WGPUCompositeAlphaMode_Premultiplied
+            : WGPUCompositeAlphaMode_Unpremultiplied;
     }
+
+    WGPUSurfaceCapabilities surface_caps;
+    _sapp_clear(&surface_caps, sizeof(surface_caps));
+    wgpuSurfaceGetCapabilities(_sapp.wgpu.surface, _sapp.wgpu.adapter, &surface_caps);
+
+    bool alpha_mode_supported = false;
+    for (size_t i = 0; i < surface_caps.alphaModeCount; i++) {
+        if (surface_caps.alphaModes[i] == alpha_mode) alpha_mode_supported = true;
+    }
+    if (!alpha_mode_supported) {
+        alpha_mode = WGPUCompositeAlphaMode_Auto;
+        // TODO: Warning or panic?
+    }
+
+    wgpuSurfaceCapabilitiesFreeMembers(surface_caps);
+
+    WGPUSurfaceConfiguration surface_config;
+    _sapp_clear(&surface_config, sizeof(surface_config));
+    surface_config.nextInChain = nullptr;
+    surface_config.device = _sapp.wgpu.device;
+    surface_config.format = _sapp.wgpu.render_format;
+    surface_config.usage = WGPUTextureUsage_RenderAttachment;
+    surface_config.alphaMode = alpha_mode;
+    surface_config.width = (uint32_t)_sapp.framebuffer_width;
+    surface_config.height = (uint32_t)_sapp.framebuffer_height;
+    surface_config.presentMode = WGPUPresentMode_Fifo;
+    wgpuSurfaceConfigure(_sapp.wgpu.surface, &surface_config);
 
     WGPUTextureDescriptor ds_desc;
     _sapp_clear(&ds_desc, sizeof(ds_desc));
@@ -5847,7 +5866,7 @@ _SOKOL_PRIVATE void _sapp_emsc_wgpu_create_swapchain(void) {
     }
 }
 
-_SOKOL_PRIVATE void _sapp_emsc_wgpu_discard_swapchain(void) {
+_SOKOL_PRIVATE void _sapp_emsc_wgpu_discard_surface(void) {
     if (_sapp.wgpu.msaa_view) {
         wgpuTextureViewRelease(_sapp.wgpu.msaa_view);
         _sapp.wgpu.msaa_view = 0;
@@ -5864,19 +5883,16 @@ _SOKOL_PRIVATE void _sapp_emsc_wgpu_discard_swapchain(void) {
         wgpuTextureRelease(_sapp.wgpu.depth_stencil_tex);
         _sapp.wgpu.depth_stencil_tex = 0;
     }
-    if (_sapp.wgpu.swapchain) {
-        wgpuSwapChainRelease(_sapp.wgpu.swapchain);
-        _sapp.wgpu.swapchain = 0;
-    }
     if (_sapp.wgpu.surface) {
+        wgpuSurfaceUnconfigure(_sapp.wgpu.surface);
         wgpuSurfaceRelease(_sapp.wgpu.surface);
         _sapp.wgpu.surface = 0;
     }
 }
 
 _SOKOL_PRIVATE void _sapp_emsc_wgpu_size_changed(void) {
-    _sapp_emsc_wgpu_discard_swapchain();
-    _sapp_emsc_wgpu_create_swapchain();
+    _sapp_emsc_wgpu_discard_surface();
+    _sapp_emsc_wgpu_create_surface();
 }
 
 _SOKOL_PRIVATE void _sapp_emsc_wgpu_request_device_cb(WGPURequestDeviceStatus status, WGPUDevice device, const char* msg, void* userdata) {
@@ -5892,7 +5908,7 @@ _SOKOL_PRIVATE void _sapp_emsc_wgpu_request_device_cb(WGPURequestDeviceStatus st
     }
     SOKOL_ASSERT(device);
     _sapp.wgpu.device = device;
-    _sapp_emsc_wgpu_create_swapchain();
+    _sapp_emsc_wgpu_create_surface();
     _sapp.wgpu.async_init_done = true;
 }
 
@@ -5952,10 +5968,22 @@ _SOKOL_PRIVATE void _sapp_emsc_wgpu_init(void) {
 
 _SOKOL_PRIVATE void _sapp_emsc_wgpu_frame(void) {
     if (_sapp.wgpu.async_init_done) {
-        _sapp.wgpu.swapchain_view = wgpuSwapChainGetCurrentTextureView(_sapp.wgpu.swapchain);
+        WGPUSurfaceTexture surface_tex;
+        wgpuSurfaceGetCurrentTexture(_sapp.wgpu.surface, &surface_tex);
+        // TODO: Check surfaceTexture.suboptimal, and recreate surface if true?
+        if (surface_tex.status != WGPUSurfaceGetCurrentTextureStatus_Success) {
+            // TODO: Panic
+            _SAPP_PANIC(WGPU_REQUEST_ADAPTER_STATUS_UNKNOWN);
+        }
+        _sapp.wgpu.surface_view = wgpuTextureCreateView(surface_tex.texture, nullptr); // nullptr for surface defaults
+        if (!_sapp.wgpu.surface_view) {
+            // TODO: Panic
+            _SAPP_PANIC(WGPU_REQUEST_ADAPTER_STATUS_UNKNOWN);
+        }
         _sapp_frame();
-        wgpuTextureViewRelease(_sapp.wgpu.swapchain_view);
-        _sapp.wgpu.swapchain_view = 0;
+        wgpuTextureViewRelease(_sapp.wgpu.surface_view);
+        _sapp.wgpu.surface_view = 0;
+        wgpuTextureRelease(surface_tex.texture); // TODO: check
     }
 }
 #endif // SOKOL_WGPU
@@ -12332,8 +12360,8 @@ SOKOL_API_IMPL const void* sapp_wgpu_get_render_view(void) {
             SOKOL_ASSERT(_sapp.wgpu.msaa_view);
             return (const void*) _sapp.wgpu.msaa_view;
         } else {
-            SOKOL_ASSERT(_sapp.wgpu.swapchain_view);
-            return (const void*) _sapp.wgpu.swapchain_view;
+            SOKOL_ASSERT(_sapp.wgpu.surface_view);
+            return (const void*) _sapp.wgpu.surface_view;
         }
     #else
         return 0;
@@ -12344,8 +12372,8 @@ SOKOL_API_IMPL const void* sapp_wgpu_get_resolve_view(void) {
     SOKOL_ASSERT(_sapp.valid);
     #if defined(_SAPP_EMSCRIPTEN) && defined(SOKOL_WGPU)
         if (_sapp.sample_count > 1) {
-            SOKOL_ASSERT(_sapp.wgpu.swapchain_view);
-            return (const void*) _sapp.wgpu.swapchain_view;
+            SOKOL_ASSERT(_sapp.wgpu.surface_view);
+            return (const void*) _sapp.wgpu.surface_view;
         } else {
             return 0;
         }
