@@ -5798,27 +5798,24 @@ _SOKOL_PRIVATE void _sapp_emsc_wgpu_create_surface(void) {
     }
     _sapp.wgpu.render_format = wgpuSurfaceGetPreferredFormat(_sapp.wgpu.surface, _sapp.wgpu.adapter);
 
+    // If the user requests alpha, check if it's supported
     WGPUCompositeAlphaMode alpha_mode = WGPUCompositeAlphaMode_Auto;
     if (_sapp.desc.alpha) {
-        alpha_mode = _sapp.desc.html5_premultiplied_alpha ?
+        WGPUCompositeAlphaMode requested_alpha_mode = _sapp.desc.html5_premultiplied_alpha ?
             WGPUCompositeAlphaMode_Premultiplied
             : WGPUCompositeAlphaMode_Unpremultiplied;
+        WGPUSurfaceCapabilities surface_caps;
+        _sapp_clear(&surface_caps, sizeof(surface_caps));
+        wgpuSurfaceGetCapabilities(_sapp.wgpu.surface, _sapp.wgpu.adapter, &surface_caps);
+        for (size_t i = 0; i < surface_caps.alphaModeCount; i++) {
+            if (surface_caps.alphaModes[i] == requested_alpha_mode) {
+                alpha_mode = requested_alpha_mode;
+                break;
+            }
+        }
+        // TODO: Warning if requested alpha mode is not supported?
+        wgpuSurfaceCapabilitiesFreeMembers(surface_caps);
     }
-
-    WGPUSurfaceCapabilities surface_caps;
-    _sapp_clear(&surface_caps, sizeof(surface_caps));
-    wgpuSurfaceGetCapabilities(_sapp.wgpu.surface, _sapp.wgpu.adapter, &surface_caps);
-
-    bool alpha_mode_supported = false;
-    for (size_t i = 0; i < surface_caps.alphaModeCount; i++) {
-        if (surface_caps.alphaModes[i] == alpha_mode) alpha_mode_supported = true;
-    }
-    if (!alpha_mode_supported) {
-        alpha_mode = WGPUCompositeAlphaMode_Auto;
-        // TODO: Warning or panic?
-    }
-
-    wgpuSurfaceCapabilitiesFreeMembers(surface_caps);
 
     WGPUSurfaceConfiguration surface_config;
     _sapp_clear(&surface_config, sizeof(surface_config));
@@ -5979,18 +5976,18 @@ _SOKOL_PRIVATE void _sapp_emsc_wgpu_frame(void) {
         wgpuSurfaceGetCurrentTexture(_sapp.wgpu.surface, &surface_tex);
         // TODO: Check surfaceTexture.suboptimal, and recreate surface if true?
         if (surface_tex.status != WGPUSurfaceGetCurrentTextureStatus_Success) {
-            // TODO: Panic
+            // TODO: Add relevant message, don't panic on non-error status
             _SAPP_PANIC(WGPU_REQUEST_ADAPTER_STATUS_UNKNOWN);
         }
         _sapp.wgpu.surface_view = wgpuTextureCreateView(surface_tex.texture, NULL); // NULL for surface defaults
         if (!_sapp.wgpu.surface_view) {
-            // TODO: Panic
+            // TODO: Add relevant message
             _SAPP_PANIC(WGPU_REQUEST_ADAPTER_STATUS_UNKNOWN);
         }
         _sapp_frame();
         wgpuTextureViewRelease(_sapp.wgpu.surface_view);
         _sapp.wgpu.surface_view = 0;
-        wgpuTextureRelease(surface_tex.texture); // TODO: check
+        wgpuTextureRelease(surface_tex.texture);
     }
 }
 #endif // SOKOL_WGPU
